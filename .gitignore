@@ -1,0 +1,24 @@
+# IDE
+.DS_Store
+.idea
+.vscode
+
+# Log files
+*.log
+logs/*
+
+# pytest
+.pytest_cache
+
+# Environments
+.env
+.venv
+ENV/
+env.bak/
+env/
+venv
+venv.bak/
+venv/
+
+# Git
+!.gitkeep
