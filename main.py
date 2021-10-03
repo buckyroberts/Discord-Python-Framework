@@ -1,13 +1,18 @@
-from discord.ext import commands
+from discord.ext import commands, tasks
 from pymongo import MongoClient
+from pymongo.errors import DuplicateKeyError
 
 from config.settings import (
+    BANK_IP,
+    BANK_PROTOCOL,
+    BOT_ACCOUNT_NUMBER,
     DISCORD_TOKEN,
     MONGO_DB_NAME,
     MONGO_HOST,
     MONGO_PORT
 )
 from utils.discord import generate_verification_code, send_embed, send_verification_message
+from utils.network import fetch
 from utils.thenewboston import is_valid_account_number
 
 bot = commands.Bot(command_prefix='>')
@@ -15,6 +20,7 @@ bot = commands.Bot(command_prefix='>')
 mongo = MongoClient(MONGO_HOST, MONGO_PORT)
 database = mongo[MONGO_DB_NAME]
 
+DEPOSITS = database['deposits']
 REGISTRATIONS = database['registrations']
 USERS = database['users']
 
@@ -40,6 +46,51 @@ USER
 """
 
 
+def check_deposits():
+    """
+    Fetch bank transactions from bank
+    Insert new deposits into database
+    """
+
+    next_url = (
+        f'{BANK_PROTOCOL}://{BANK_IP}/bank_transactions'
+        f'?recipient={BOT_ACCOUNT_NUMBER}'
+        f'&ordering=block__created_date'
+    )
+
+    while next_url:
+        data = fetch(url=next_url, headers={})
+        bank_transactions = data['results']
+        next_url = data['next']
+
+        for bank_transaction in bank_transactions:
+
+            try:
+                DEPOSITS.insert_one({
+                    '_id': bank_transaction['id'],
+                    'amount': bank_transaction['amount'],
+                    'block_id': bank_transaction['block']['id'],
+                    'confirmation_checks': 0,
+                    'is_confirmed': False,
+                    'memo': bank_transaction['memo'],
+                    'sender': bank_transaction['block']['sender']
+                })
+            except DuplicateKeyError:
+                break
+
+
+@tasks.loop(seconds=5.0)
+async def poll_blockchain():
+    """
+    Poll blockchain for new transactions/deposits sent to the bot account
+    Only accept confirmed transactions
+    """
+
+    print('Polling blockchain...')
+    check_deposits()
+    # check_confirmations()
+
+
 @bot.event
 async def on_ready():
     """
@@ -47,6 +98,7 @@ async def on_ready():
     """
 
     print('Ready')
+    poll_blockchain.start()
 
 
 @bot.command()
