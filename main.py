@@ -7,6 +7,7 @@ from config.settings import (
     BANK_PROTOCOL,
     BOT_ACCOUNT_NUMBER,
     DISCORD_TOKEN,
+    MAXIMUM_CONFIRMATION_CHECKS,
     MONGO_DB_NAME,
     MONGO_HOST,
     MONGO_PORT
@@ -46,6 +47,37 @@ USER
 """
 
 
+def check_confirmations():
+    """
+    Query unconfirmed deposits from database
+    Check bank for confirmation status
+    """
+
+    unconfirmed_deposits = DEPOSITS.find({
+        'confirmation_checks': {'$lt': MAXIMUM_CONFIRMATION_CHECKS},
+        'is_confirmed': False
+    })
+
+    for deposit in unconfirmed_deposits:
+        block_id = deposit['block_id']
+        url = (
+            f'{BANK_PROTOCOL}://{BANK_IP}/confirmation_blocks'
+            f'?block={block_id}'
+        )
+
+        try:
+            data = fetch(url=url, headers={})
+            confirmations = data['count']
+
+            if confirmations:
+                handle_deposit_confirmation(deposit=deposit)
+
+        except Exception:
+            pass
+
+        increment_confirmation_checks(deposit=deposit)
+
+
 def check_deposits():
     """
     Fetch bank transactions from bank
@@ -55,7 +87,7 @@ def check_deposits():
     next_url = (
         f'{BANK_PROTOCOL}://{BANK_IP}/bank_transactions'
         f'?recipient={BOT_ACCOUNT_NUMBER}'
-        f'&ordering=block__created_date'
+        f'&ordering=-block__created_date'
     )
 
     while next_url:
@@ -79,6 +111,85 @@ def check_deposits():
                 break
 
 
+def handle_deposit_confirmation(*, deposit):
+    """
+    Update confirmation status of deposit
+    Increase users balance or create new user if they don't already exist
+    """
+
+    DEPOSITS.update_one(
+        {'_id': deposit['_id']},
+        {
+            '$set': {
+                'is_confirmed': True
+            }
+        }
+    )
+
+    registration = REGISTRATIONS.find_one({
+        'account_number': deposit['sender'],
+        'verification_code': deposit['memo']
+    })
+
+    if registration:
+        handle_registration(registration=registration)
+    else:
+        USERS.update_one(
+            {'account_number': deposit['sender']},
+            {
+                '$inc': {
+                    'balance': deposit['amount']
+                }
+            }
+        )
+
+
+def handle_registration(*, registration):
+    """
+    Ensure account number is not already registered
+    Create a new users or update account number of existing user
+    """
+
+    discord_user_id = registration['_id']
+    account_number_registered = bool(USERS.find_one({'account_number': registration['account_number']}))
+
+    if not account_number_registered:
+        existing_user = USERS.find_one({'_id': discord_user_id})
+
+        if existing_user:
+            USERS.update_one(
+                {'_id': discord_user_id},
+                {
+                    '$set': {
+                        'account_number': registration['account_number']
+                    }
+                }
+            )
+        else:
+            USERS.insert_one({
+                '_id': discord_user_id,
+                'account_number': registration['account_number'],
+                'balance': 0
+            })
+
+    REGISTRATIONS.delete_one({'_id': discord_user_id})
+
+
+def increment_confirmation_checks(*, deposit):
+    """
+    Increment the number of confirmation checks for the given deposit
+    """
+
+    DEPOSITS.update_one(
+        {'_id': deposit['_id']},
+        {
+            '$inc': {
+                'confirmation_checks': 1
+            }
+        }
+    )
+
+
 @tasks.loop(seconds=5.0)
 async def poll_blockchain():
     """
@@ -88,7 +199,7 @@ async def poll_blockchain():
 
     print('Polling blockchain...')
     check_deposits()
-    # check_confirmations()
+    check_confirmations()
 
 
 @bot.event
